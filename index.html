@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Space Khamenei Invaders</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #000;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      font-family: monospace;
+      color: #0f0;
+      overflow: hidden;
+    }
+    #hud {
+      display: flex;
+      gap: 60px;
+      margin-bottom: 8px;
+      font-size: 18px;
+      letter-spacing: 2px;
+    }
+    canvas {
+      border: 2px solid #0f0;
+      display: block;
+    }
+    #message {
+      margin-top: 12px;
+      font-size: 22px;
+      letter-spacing: 3px;
+      min-height: 28px;
+      color: #ff0;
+    }
+    #controls {
+      margin-top: 8px;
+      font-size: 12px;
+      color: #555;
+    }
+  </style>
+</head>
+<body>
+  <div id="hud">
+    <span>SCORE: <span id="score">0</span></span>
+    <span>LIVES: <span id="lives">3</span></span>
+    <span>LEVEL: <span id="level">1</span></span>
+  </div>
+  <canvas id="canvas" width="800" height="550"></canvas>
+  <div id="message"></div>
+  <div id="controls">← → Move &nbsp;|&nbsp; SPACE Shoot &nbsp;|&nbsp; R Restart</div>
+
+  <script>
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const W = canvas.width, H = canvas.height;
+
+    const invaderImg = new Image();
+    invaderImg.src = 'Khaminai.jpg';
+
+    let state = 'waiting';
+    let score = 0, lives = 3, level = 1;
+    let keys = {};
+
+    const PLAYER_W = 50, PLAYER_H = 30;
+    let player = { x: W / 2 - PLAYER_W / 2, y: H - 60, w: PLAYER_W, h: PLAYER_H, flash: 0 };
+    let playerBullets = [];
+    let shootCooldown = 0;
+
+    const INV_COLS = 10, INV_ROWS = 4;
+    const INV_W = 52, INV_H = 52, INV_PAD_X = 18, INV_PAD_Y = 14;
+    let invaders = [];
+    let invDir = 1;
+    let invMoveTimer = 0;
+    let invMoveInterval = 60;
+    let invDropAmount = 18;
+    let invBullets = [];
+    let invShootTimer = 0;
+    let invShootInterval = 80;
+
+    let barriers = [];
+
+    function initGame() {
+      score = 0; lives = 3; level = 1;
+      player.x = W / 2 - PLAYER_W / 2;
+      player.flash = 0;
+      document.getElementById('score').textContent = 0;
+      document.getElementById('lives').textContent = 3;
+      document.getElementById('level').textContent = 1;
+      setupLevel();
+      document.getElementById('message').textContent = '';
+      state = 'playing';
+    }
+
+    function setupLevel() {
+      playerBullets = [];
+      invBullets = [];
+      invDir = 1;
+      invMoveTimer = 0;
+      invMoveInterval = Math.max(10, 60 - (level - 1) * 8);
+      shootCooldown = 0;
+
+      invaders = [];
+      const startX = 55;
+      const startY = 55;
+      for (let row = 0; row < INV_ROWS; row++) {
+        for (let col = 0; col < INV_COLS; col++) {
+          invaders.push({
+            x: startX + col * (INV_W + INV_PAD_X),
+            y: startY + row * (INV_H + INV_PAD_Y),
+            w: INV_W, h: INV_H,
+            alive: true,
+            row, col
+          });
+        }
+      }
+
+      barriers = [];
+      const bCount = 4;
+      const bW = 70, bH = 40;
+      const blockSize = 7;
+      for (let i = 0; i < bCount; i++) {
+        const bx = 80 + i * ((W - 160) / (bCount - 1)) - bW / 2;
+        const by = H - 130;
+        let blocks = [];
+        const cols = Math.floor(bW / blockSize);
+        const rows = Math.floor(bH / blockSize);
+        for (let brow = 0; brow < rows; brow++) {
+          for (let bcol = 0; bcol < cols; bcol++) {
+            const cx = bcol - cols / 2 + 0.5;
+            if (brow > rows * 0.55 && Math.abs(cx) < 2) continue;
+            blocks.push({ x: bx + bcol * blockSize, y: by + brow * blockSize, w: blockSize, h: blockSize, hp: 3 });
+          }
+        }
+        barriers.push(blocks);
+      }
+    }
+
+    function nextLevel() {
+      level++;
+      document.getElementById('level').textContent = level;
+      setupLevel();
+      document.getElementById('message').textContent = `LEVEL ${level}`;
+      setTimeout(() => {
+        if (state === 'playing') document.getElementById('message').textContent = '';
+      }, 1500);
+    }
+
+    document.addEventListener('keydown', e => {
+      keys[e.code] = true;
+      if (e.code === 'KeyR') initGame();
+      if (e.code === 'Space' && state === 'waiting') initGame();
+      if (['Space','ArrowLeft','ArrowRight'].includes(e.code)) e.preventDefault();
+    });
+    document.addEventListener('keyup', e => { keys[e.code] = false; });
+
+    function rectOverlap(a, b) {
+      return a.x < b.x + b.w && a.x + a.w > b.x &&
+             a.y < b.y + b.h && a.y + a.h > b.y;
+    }
+
+    function update() {
+      if (state !== 'playing') return;
+
+      // Player movement
+      if (keys['ArrowLeft'])  player.x = Math.max(0, player.x - 5);
+      if (keys['ArrowRight']) player.x = Math.min(W - player.w, player.x + 5);
+
+      // Shoot
+      if (shootCooldown > 0) shootCooldown--;
+      if (keys['Space'] && shootCooldown === 0 && playerBullets.length < 3) {
+        playerBullets.push({ x: player.x + player.w / 2 - 2, y: player.y, w: 4, h: 14, vy: -10 });
+        shootCooldown = 18;
+      }
+
+      // Player bullets move
+      playerBullets = playerBullets.filter(b => { b.y += b.vy; return b.y + b.h > 0; });
+
+      // Invaders move
+      invMoveTimer++;
+      if (invMoveTimer >= invMoveInterval) {
+        invMoveTimer = 0;
+        const alive = invaders.filter(i => i.alive);
+        if (alive.length === 0) return;
+
+        const step = 12 + (level - 1) * 1.5;
+        const minX = Math.min(...alive.map(i => i.x));
+        const maxX = Math.max(...alive.map(i => i.x + i.w));
+
+        let drop = false;
+        if (invDir === 1 && maxX + step > W - 8) { drop = true; invDir = -1; }
+        else if (invDir === -1 && minX - step < 8) { drop = true; invDir = 1; }
+
+        for (let inv of invaders) {
+          if (!inv.alive) continue;
+          if (drop) inv.y += invDropAmount;
+          else inv.x += invDir * step;
+        }
+      }
+
+      // Invader shooting
+      invShootTimer++;
+      invShootInterval = Math.max(25, 80 - (level - 1) * 10);
+      if (invShootTimer >= invShootInterval) {
+        invShootTimer = 0;
+        const alive = invaders.filter(i => i.alive);
+        if (alive.length > 0) {
+          const shooter = alive[Math.floor(Math.random() * alive.length)];
+          invBullets.push({ x: shooter.x + shooter.w / 2 - 2, y: shooter.y + shooter.h, w: 4, h: 14, vy: 5 + level * 0.5 });
+        }
+      }
+
+      // Invader bullets move
+      invBullets = invBullets.filter(b => { b.y += b.vy; return b.y < H; });
+
+      // Player bullets vs invaders
+      for (let b of playerBullets) {
+        for (let inv of invaders) {
+          if (!inv.alive) continue;
+          if (rectOverlap(b, inv)) {
+            inv.alive = false;
+            b.y = -999;
+            score += (INV_ROWS - inv.row) * 10;
+            document.getElementById('score').textContent = score;
+          }
+        }
+      }
+
+      // Player bullets vs barriers
+      for (let b of playerBullets) {
+        for (let blocks of barriers) {
+          for (let bl of blocks) {
+            if (bl.hp <= 0) continue;
+            if (rectOverlap(b, bl)) { bl.hp--; b.y = -999; }
+          }
+        }
+      }
+
+      // Invader bullets vs player
+      for (let b of invBullets) {
+        if (rectOverlap(b, player)) {
+          b.y = -999;
+          lives--;
+          document.getElementById('lives').textContent = lives;
+          player.flash = 40;
+          if (lives <= 0) {
+            state = 'dead';
+            document.getElementById('message').textContent = 'GAME OVER — Press R to restart';
+          }
+        }
+      }
+
+      // Invader bullets vs barriers
+      for (let b of invBullets) {
+        for (let blocks of barriers) {
+          for (let bl of blocks) {
+            if (bl.hp <= 0) continue;
+            if (rectOverlap(b, bl)) { bl.hp--; b.y = -999; }
+          }
+        }
+      }
+
+      // Invaders reach player line
+      for (let inv of invaders) {
+        if (inv.alive && inv.y + inv.h >= player.y) {
+          state = 'dead';
+          document.getElementById('message').textContent = 'GAME OVER — Press R to restart';
+          return;
+        }
+      }
+
+      // All invaders dead -> next level
+      if (invaders.every(i => !i.alive)) nextLevel();
+
+      if (player.flash > 0) player.flash--;
+    }
+
+    function drawPlayer() {
+      if (player.flash > 0 && player.flash % 6 < 3) return;
+      ctx.fillStyle = '#0f0';
+      ctx.fillRect(player.x + 10, player.y + 10, player.w - 20, player.h - 10);
+      ctx.fillRect(player.x + player.w / 2 - 4, player.y, 8, 14);
+      ctx.fillRect(player.x, player.y + 16, 14, 14);
+      ctx.fillRect(player.x + player.w - 14, player.y + 16, 14, 14);
+    }
+
+    function draw() {
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, W, H);
+
+      if (state === 'waiting') {
+        ctx.textAlign = 'center';
+        ctx.fillStyle = '#0f0';
+        ctx.font = 'bold 42px monospace';
+        ctx.fillText('SPACE KHAMENEI INVADERS', W / 2, H / 2 - 50);
+        ctx.font = '20px monospace';
+        ctx.fillText('Press SPACE to start', W / 2, H / 2 + 10);
+        ctx.fillStyle = '#555';
+        ctx.font = '14px monospace';
+        ctx.fillText('← → Move   SPACE Shoot   R Restart', W / 2, H / 2 + 50);
+        ctx.textAlign = 'left';
+        return;
+      }
+
+      // Barriers
+      for (let blocks of barriers) {
+        for (let bl of blocks) {
+          if (bl.hp <= 0) continue;
+          ctx.fillStyle = `rgba(0, 200, 0, ${bl.hp / 3})`;
+          ctx.fillRect(bl.x, bl.y, bl.w, bl.h);
+        }
+      }
+
+      // Invaders
+      const imgReady = invaderImg.complete && invaderImg.naturalWidth > 0;
+      for (let inv of invaders) {
+        if (!inv.alive) continue;
+        const cx = inv.x + inv.w / 2, cy = inv.y + inv.h / 2, r = inv.w / 2;
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(cx, cy, r, 0, Math.PI * 2);
+        ctx.clip();
+        if (imgReady) {
+          ctx.drawImage(invaderImg, inv.x, inv.y, inv.w, inv.h);
+        } else {
+          ctx.fillStyle = '#933';
+          ctx.fillRect(inv.x, inv.y, inv.w, inv.h);
+        }
+        ctx.restore();
+        ctx.strokeStyle = '#f00';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.arc(cx, cy, r, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+
+      // Player
+      drawPlayer();
+
+      // Player bullets
+      ctx.fillStyle = '#ff0';
+      for (let b of playerBullets) ctx.fillRect(b.x, b.y, b.w, b.h);
+
+      // Invader bullets (zigzag look)
+      ctx.fillStyle = '#f44';
+      for (let b of invBullets) {
+        ctx.fillRect(b.x,     b.y,     b.w, 4);
+        ctx.fillRect(b.x - 2, b.y + 4, b.w, 4);
+        ctx.fillRect(b.x + 2, b.y + 8, b.w, 4);
+        ctx.fillRect(b.x,     b.y + 12, b.w, 2);
+      }
+
+      // Ground line
+      ctx.strokeStyle = '#0f0';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(0, H - 20);
+      ctx.lineTo(W, H - 20);
+      ctx.stroke();
+    }
+
+    function loop() {
+      update();
+      draw();
+      requestAnimationFrame(loop);
+    }
+
+    invaderImg.onload = invaderImg.onerror = () => {
+      state = 'waiting';
+      loop();
+    };
+  </script>
+</body>
+</html>
